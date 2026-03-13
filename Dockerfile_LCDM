@@ -1,0 +1,59 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Install System Dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential git python3 python3-pip python3-dev \
+    libgsl-dev libopenblas-dev liblapack-dev wget curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fix: Symlink so 'python' works as well as 'python3'
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+# 2. Setup Python environment
+RUN python3 -m pip install --upgrade pip wheel setuptools
+RUN python3 -m pip install numpy scipy matplotlib pandas pyyaml cython cobaya getdist
+
+# 3. Clone and Build the C-library
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/lesgourg/class_public.git CLASS
+WORKDIR /opt/CLASS
+RUN make clean && make -j$(nproc)
+
+# 4. The Surgical Build & Manual Package Install
+WORKDIR /opt/CLASS/python
+
+# A. Clean & Translate (The PyInit Fix)
+RUN rm -rf build/ && rm -f *.c *.cpp
+# Force Cython to generate a fresh C++ bridge for Python 3
+RUN cython --cplus *.pyx -o classy.cpp
+
+# B. Compile Locally (Don't use Pip, it flattens the package)
+RUN python3 setup.py build_ext --inplace
+
+# C. Manual Installation (The Package Fix)
+RUN mkdir -p /usr/local/lib/python3.10/dist-packages/classy
+# Copy the python source files
+RUN cp -r classy/. /usr/local/lib/python3.10/dist-packages/classy/ || cp *.py /usr/local/lib/python3.10/dist-packages/classy/
+# Copy the compiled library we just built
+RUN cp *.so /usr/local/lib/python3.10/dist-packages/classy/
+
+# 5. Final Cleanup
+WORKDIR /root
+# Save the math library
+RUN cp /opt/CLASS/libclass.a /usr/local/lib/
+# Delete the source so Python MUST use the installed package
+RUN rm -rf /opt/CLASS
+
+# 6. Verification
+ENV PYTHONPATH=""
+
+# Test 1: Verify CLASS physics (The "VICTORY" check)
+RUN python3 -c "import classy; cosmo = classy.Class(); cosmo.set({'H0':70, 'output':'mPk', 'P_k_max_1/Mpc': 3.0, 'z_max_pk': 3.0}); cosmo.compute(); print('VICTORY: Power spectrum at k=0.1 is', cosmo.pk(0.1, 0))"
+
+# Test 2: Verify Cobaya (Using Python to bypass PATH issues)
+RUN python3 -c "import cobaya; print('SUCCESS: Cobaya version', cobaya.__version__, 'is installed and importable!')"
+
+WORKDIR /root
+CMD ["bash"]
